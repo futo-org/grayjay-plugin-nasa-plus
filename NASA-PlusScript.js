@@ -8,6 +8,7 @@ const API_BASE_URL = "https://plus.nasa.gov/wp-json/wp/v2";
 const CUSTOM_API_BASE_URL = "https://plus.nasa.gov/wp-json/nasaplus/v1";
 const CHANNEL_THUMBNAIL_URL = "https://www.nasa.gov/wp-content/themes/nasa/assets/images/nasa-logo@2x.png";
 const CHANNEL_DESCRIPTION = "NASA+ is NASA's on-demand streaming service. Watch original series, live coverage, and explore NASA's missions across air and space.";
+const PLUGIN_ICON_URL = "https://plugins.grayjay.app/NASA-Plus/NASA-PlusIcon.png";
 
 const REQUEST_HEADERS = {
     "Accept": "application/json",
@@ -109,7 +110,7 @@ source.saveState = function () {
  * @returns {NASAVideoPager}
  */
 source.getHome = function () {
-    const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc";
+    const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia";
     const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc";
 
     const batchResults = http.batch()
@@ -184,7 +185,24 @@ source.getChannelContents = function (url, type, order, filters) {
         if (type === Type.Feed.Playlists) {
             return getSeriesPlaylists();
         }
-        return fetchVideosPage(1, {});
+
+        const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia";
+        const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc";
+
+        const batchResults = http.batch()
+            .GET(scheduledUrl, REQUEST_HEADERS, false)
+            .GET(videosUrl, REQUEST_HEADERS, false)
+            .execute();
+
+        const liveVideos = parseScheduledResponse(batchResults[0]);
+        const regularPage = parseVideosResponse(batchResults[1], 1, {});
+
+        if (liveVideos.length > 0) {
+            const combined = liveVideos.concat(regularPage.results);
+            return new NASAVideoPager(combined, regularPage.hasMore, 1, {});
+        }
+
+        return regularPage;
     }
 
     const seriesMatch = url.match(SERIES_URL_REGEX);
@@ -289,7 +307,7 @@ source.getContentDetails = function (url) {
     const scheduledMatch = url.match(SCHEDULED_VIDEO_URL_REGEX);
     if (scheduledMatch) {
         const slug = scheduledMatch[1];
-        const resp = httpGET({ url: API_BASE_URL + "/scheduled_video?slug=" + encodeURIComponent(slug), parseResponse: true });
+        const resp = httpGET({ url: API_BASE_URL + "/scheduled_video?slug=" + encodeURIComponent(slug) + "&_embed=wp:featuredmedia", parseResponse: true });
         if (!resp.isOk || !resp.body || resp.body.length === 0) {
             throw new ScriptException("Scheduled event not found: " + slug);
         }
@@ -1091,7 +1109,7 @@ function buildSeriesPlaylist(series) {
         id: new PlatformID(PLATFORM, "series-" + series.slug, config.id),
         name: series.name,
         author: nasaAuthor(),
-        thumbnail: "",
+        thumbnail: PLUGIN_ICON_URL,
         url: BASE_URL + "/series/" + series.slug + "/",
         videoCount: series.count || -1
     });
@@ -1103,7 +1121,7 @@ function buildSeriesPlaylist(series) {
  * @returns {PlatformVideo[]}
  */
 function fetchScheduledVideos() {
-    const resp = http.GET(API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc", REQUEST_HEADERS, false);
+    const resp = http.GET(API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia", REQUEST_HEADERS, false);
     return parseScheduledResponse(resp);
 }
 
@@ -1150,6 +1168,15 @@ function parseScheduledResponse(resp) {
 }
 
 /**
+ * Extracts the thumbnail URL from a scheduled video's embedded featured media.
+ * @param {Object} item - WordPress scheduled_video REST API object with _embedded
+ * @returns {string} Thumbnail URL or empty string
+ */
+function getScheduledThumbnailUrl(item) {
+    return item._embedded?.["wp:featuredmedia"]?.[0]?.source_url || "";
+}
+
+/**
  * Builds a PlatformVideo from a scheduled video object.
  * @param {Object} item - WordPress scheduled_video REST API object
  * @param {boolean} isLive - Whether the event is currently live
@@ -1164,7 +1191,7 @@ function buildScheduledPlatformVideo(item, isLive) {
     return new PlatformVideo({
         id: new PlatformID(PLATFORM, "scheduled-" + String(item.id), config.id),
         name: title,
-        thumbnails: buildThumbnails(item),
+        thumbnails: buildThumbnails({ featured_image: getScheduledThumbnailUrl(item) }),
         author: nasaAuthor(),
         uploadDate: startTime,
         duration: isLive ? 0 : duration,
@@ -1191,7 +1218,7 @@ function buildScheduledVideoDetails(item) {
     const fields = {
         id: new PlatformID(PLATFORM, "scheduled-" + String(item.id), config.id),
         name: title,
-        thumbnails: buildThumbnails(item),
+        thumbnails: buildThumbnails({ featured_image: getScheduledThumbnailUrl(item) }),
         author: nasaAuthor(),
         uploadDate: startTime,
         duration: isLive ? 0 : duration,
