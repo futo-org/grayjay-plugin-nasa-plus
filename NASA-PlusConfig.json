@@ -47,12 +47,12 @@
   },
   "changelog": {
     "2": [
-      "- Fix missing thumbnails on scheduled/live videos;",
-      "- Show live/upcoming events on NASA channel page;",
-      "- Add thumbnails to series playlists;"
+      "Fix missing thumbnails on scheduled/live videos;",
+      "Show live/upcoming events on NASA channel page;",
+      "Add thumbnails to series playlists;"
     ],
     "1": [
-      "- Initial implementation;"
+      "Initial implementation;"
     ]
   }
 }
