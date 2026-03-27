@@ -462,6 +462,31 @@ source.searchSuggestions = function (query) {
 };
 
 /**
+ * Searches for playlists (series) matching the query.
+ * @param {string} query - Search query
+ * @returns {NASAPlaylistPager}
+ */
+source.searchPlaylists = function (query) {
+    if (!query || query.trim().length === 0) {
+        return new NASAPlaylistPager([], false, []);
+    }
+
+    const allSeries = fetchAllSeries();
+    const lowerQuery = query.toLowerCase();
+    const playlists = allSeries
+        .filter(function (s) {
+            return s.count > 0 && (
+                s.name.toLowerCase().indexOf(lowerQuery) !== -1 ||
+                (s.description && s.description.toLowerCase().indexOf(lowerQuery) !== -1)
+            );
+        })
+        .sort(function (a, b) { return (b.count || 0) - (a.count || 0); })
+        .map(function (s) { return buildSeriesPlaylist(s); });
+
+    return new NASAPlaylistPager(playlists, false, []);
+};
+
+/**
  * Searches for channels (series) matching the query.
  * @param {string} query - Search query
  * @returns {NASASeriesSearchPager}
