@@ -692,6 +692,7 @@ function parseVideosResponse(resp, page, params) {
  * Searches for videos using the WordPress REST API search parameter.
  * @param {string} query - Search query
  * @param {number} page - Page number (1-based)
+ * @param {Object} [params] - Filter parameters (series, topic)
  * @returns {NASASearchPager}
  */
 function searchVideos(query, page, params) {
