@@ -836,6 +836,20 @@ function buildDescription(item) {
     const language = item.meta?.["language"] || item.meta?.["Language"];
     if (language) parts.push("Language: " + language);
 
+    const seriesIds = item.series;
+    if (seriesIds && seriesIds.length > 0) {
+
+        parts.push("\n");
+
+        const allSeries = fetchAllSeries();
+        for (let i = 0; i < allSeries.length; i++) {
+            if (allSeries[i].id === seriesIds[0]) {
+                parts.push(allSeries[i].name + " - " + BASE_URL + "/series/" + allSeries[i].slug + "/");
+                break;
+            }
+        }
+    }
+
     return parts.join("\n");
 }
 
