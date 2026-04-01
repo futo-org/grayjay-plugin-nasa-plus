@@ -2,9 +2,9 @@
   "id": "a1b2c3d4-5e6f-7890-abcd-ef1234567890",
   "name": "NASA+ (Alpha)",
   "description": "Explore the unknown in air and space. Watch original series, documentaries, and features from NASA's streaming service.",
-  "version": 2,
+  "version": 3,
   "author": "FUTO",
-  "authorUrl": "https://futo.org",
+  "authorUrl": "https://futo.tech",
   "platformUrl": "https://plus.nasa.gov",
   "repositoryUrl": "https://gitlab.futo.org/videostreaming/plugins/nasa-plus",
   "sourceUrl": "https://plugins.grayjay.app/NASA-Plus/NASA-PlusConfig.json",
@@ -46,6 +46,10 @@
     }
   },
   "changelog": {
+    "3": [
+      "Improvement: Search playlists;",
+      "Improvement: Add series information to video descriptions;"
+    ],
     "2": [
       "Fix missing thumbnails on scheduled/live videos;",
       "Show live/upcoming events on NASA channel page;",
