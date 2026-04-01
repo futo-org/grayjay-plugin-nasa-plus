@@ -593,6 +593,30 @@ class NASAPlaylistPager extends PlaylistPager {
     }
 }
 
+/**
+ * Pager for topic-filtered series playlists, discovered incrementally from video pages.
+ * @extends PlaylistPager
+ */
+class NASATopicPlaylistPager extends PlaylistPager {
+    /**
+     * @param {PlatformPlaylist[]} results - Playlists discovered on the current video page
+     * @param {boolean} hasMore - Whether more video pages remain to scan
+     * @param {number} topicId - Topic taxonomy ID
+     * @param {number} videoPage - Current video page number
+     * @param {Object} seenSeriesIds - Map of already-returned series IDs
+     */
+    constructor(results, hasMore, topicId, videoPage, seenSeriesIds) {
+        super(results, hasMore);
+        this.topicId = topicId;
+        this.videoPage = videoPage;
+        this.seenSeriesIds = seenSeriesIds;
+    }
+
+    nextPage() {
+        return fetchTopicSeriesPage(this.topicId, this.videoPage + 1, this.seenSeriesIds);
+    }
+}
+
 // ==========================================================================
 // Helper Functions
 // ==========================================================================
@@ -1109,34 +1133,53 @@ function getSeriesPlaylists() {
 function getTopicSeriesPlaylists(topicSlug) {
     const topicId = findTopicIdBySlug(topicSlug);
     if (!topicId) {
-        return new NASAPlaylistPager([], false, []);
+        return new NASATopicPlaylistPager([], false, topicId, 1, {});
     }
+    return fetchTopicSeriesPage(topicId, 1, {});
+}
 
+/**
+ * Fetches one page of videos for a topic, extracts new series, and returns them as playlists.
+ * Carries forward already-seen series IDs to avoid duplicates across pages.
+ * @param {number} topicId - Topic taxonomy ID
+ * @param {number} page - Current video page (1-based)
+ * @param {Object} seenSeriesIds - Map of already-returned series IDs
+ * @returns {NASATopicPlaylistPager}
+ */
+function fetchTopicSeriesPage(topicId, page, seenSeriesIds) {
     const resp = httpGET({
-        url: API_BASE_URL + "/video?per_page=100&topic=" + topicId,
+        url: API_BASE_URL + "/video?per_page=100&page=" + page + "&topic=" + topicId,
         parseResponse: true
     });
-    if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) {
-        return new NASAPlaylistPager([], false, []);
+
+    if (!resp.isOk || !resp.body || !Array.isArray(resp.body) || resp.body.length === 0) {
+        return new NASATopicPlaylistPager([], false, topicId, page, seenSeriesIds);
     }
 
-    const seriesIdSet = {};
+    const newSeriesIds = {};
     for (let i = 0; i < resp.body.length; i++) {
         const seriesIds = resp.body[i].series;
         if (seriesIds) {
             for (let j = 0; j < seriesIds.length; j++) {
-                seriesIdSet[seriesIds[j]] = true;
+                if (!seenSeriesIds[seriesIds[j]]) {
+                    newSeriesIds[seriesIds[j]] = true;
+                }
             }
         }
     }
 
     const allSeries = fetchAllSeries();
     const playlists = allSeries
-        .filter(function (s) { return seriesIdSet[s.id] && s.count > 0; })
+        .filter(function (s) { return newSeriesIds[s.id] && s.count > 0; })
         .sort(function (a, b) { return (b.count || 0) - (a.count || 0); })
         .map(function (s) { return buildSeriesPlaylist(s); });
 
-    return new NASAPlaylistPager(playlists, false, []);
+    const updatedSeen = {};
+    for (var k in seenSeriesIds) updatedSeen[k] = true;
+    for (var k2 in newSeriesIds) updatedSeen[k2] = true;
+
+    const hasMoreVideoPages = resp.body.length >= 100;
+    return new NASATopicPlaylistPager(playlists, hasMoreVideoPages, topicId, page, updatedSeen);
 }
 
 /**
