@@ -16,7 +16,6 @@ const REQUEST_HEADERS = {
 };
 
 const ITEMS_PER_PAGE = 20;
-const PREVIEW_RUNTIME_THRESHOLD = 120;
 
 Type.Feed.Playlists = "Playlists";
 
@@ -59,7 +58,6 @@ const CHANNEL_URL_REGEX = /^https?:\/\/plus\.nasa\.gov\/?$/;
 // ==========================================================================
 
 let config = {};
-let settings = {};
 let state = {
     topics: [],
     series: [],
@@ -74,22 +72,32 @@ const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 // ==========================================================================
 
 /**
- * Initializes the plugin with config, settings, and restored state.
+ * Initializes the plugin with config and restored state.
  * @param {SourceConfig} conf - Plugin configuration
- * @param {Object} sett - Plugin settings
+ * @param {Object} sett - Unused plugin settings object
  * @param {string} savedStateStr - Previously saved state as JSON string
  */
 source.enable = function (conf, sett, savedStateStr) {
     config = conf ?? {};
-    settings = sett ?? {};
 
     if (savedStateStr) {
         try {
             const parsed = JSON.parse(savedStateStr);
-            if (parsed.topics) state.topics = parsed.topics;
-            if (parsed.series) state.series = parsed.series;
-            if (parsed.topicsFetchedAt) state.topicsFetchedAt = parsed.topicsFetchedAt;
-            if (parsed.seriesFetchedAt) state.seriesFetchedAt = parsed.seriesFetchedAt;
+            if (parsed.topics) {
+                state.topics = parsed.topics;
+            }
+
+            if (parsed.series) {
+                state.series = parsed.series;
+            }
+
+            if (parsed.topicsFetchedAt) {
+                state.topicsFetchedAt = parsed.topicsFetchedAt;
+            }
+
+            if (parsed.seriesFetchedAt) {
+                state.seriesFetchedAt = parsed.seriesFetchedAt;
+            }
         } catch (e) {
             log("Failed to parse saved state: " + e.message);
         }
@@ -101,7 +109,10 @@ source.enable = function (conf, sett, savedStateStr) {
  * @returns {string} JSON string of the current state
  */
 source.saveState = function () {
-    if (IS_TESTING) return "";
+    if (IS_TESTING) {
+        return "";
+    }
+
     return JSON.stringify(state);
 };
 
@@ -110,23 +121,7 @@ source.saveState = function () {
  * @returns {NASAVideoPager}
  */
 source.getHome = function () {
-    const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia";
-    const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc";
-
-    const batchResults = http.batch()
-        .GET(scheduledUrl, REQUEST_HEADERS, false)
-        .GET(videosUrl, REQUEST_HEADERS, false)
-        .execute();
-
-    const liveVideos = parseScheduledResponse(batchResults[0]);
-    const regularPage = parseVideosResponse(batchResults[1], 1, {});
-
-    if (liveVideos.length > 0) {
-        const combined = liveVideos.concat(regularPage.results);
-        return new NASAVideoPager(combined, regularPage.hasMore, 1, {});
-    }
-
-    return regularPage;
+    return fetchMainChannelVideos();
 };
 
 /**
@@ -144,21 +139,7 @@ source.isChannelUrl = function (url) {
  * @returns {PlatformChannel}
  */
 source.getChannel = function (url) {
-    if (CHANNEL_URL_REGEX.test(url)) {
-        return getNASAChannel();
-    }
-
-    const seriesMatch = url.match(SERIES_URL_REGEX);
-    if (seriesMatch) {
-        return getSeriesChannel(seriesMatch[1]);
-    }
-
-    const topicMatch = url.match(TOPIC_URL_REGEX);
-    if (topicMatch) {
-        return getTopicChannel(topicMatch[1]);
-    }
-
-    return getNASAChannel();
+    return getChannelForContext(resolveChannelContext(url));
 };
 
 /**
@@ -181,53 +162,12 @@ source.getChannelCapabilities = function () {
  * @returns {NASAVideoPager|NASAPlaylistPager}
  */
 source.getChannelContents = function (url, type, order, filters) {
-    if (CHANNEL_URL_REGEX.test(url)) {
-        if (type === Type.Feed.Playlists) {
-            return getSeriesPlaylists();
-        }
-
-        const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia";
-        const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc";
-
-        const batchResults = http.batch()
-            .GET(scheduledUrl, REQUEST_HEADERS, false)
-            .GET(videosUrl, REQUEST_HEADERS, false)
-            .execute();
-
-        const liveVideos = parseScheduledResponse(batchResults[0]);
-        const regularPage = parseVideosResponse(batchResults[1], 1, {});
-
-        if (liveVideos.length > 0) {
-            const combined = liveVideos.concat(regularPage.results);
-            return new NASAVideoPager(combined, regularPage.hasMore, 1, {});
-        }
-
-        return regularPage;
+    const context = resolveChannelContext(url);
+    if (type === Type.Feed.Playlists) {
+        return getChannelPlaylistsForContext(context);
     }
 
-    const seriesMatch = url.match(SERIES_URL_REGEX);
-    if (seriesMatch) {
-        if (type === Type.Feed.Playlists) {
-            return getSeriesAsPlaylist(seriesMatch[1]);
-        }
-        const seriesId = findSeriesIdBySlug(seriesMatch[1]);
-        if (seriesId) {
-            return fetchVideosPage(1, { series: seriesId });
-        }
-    }
-
-    const topicMatch = url.match(TOPIC_URL_REGEX);
-    if (topicMatch) {
-        if (type === Type.Feed.Playlists) {
-            return getTopicSeriesPlaylists(topicMatch[1]);
-        }
-        const topicId = findTopicIdBySlug(topicMatch[1]);
-        if (topicId) {
-            return fetchVideosPage(1, { topic: topicId });
-        }
-    }
-
-    return fetchVideosPage(1, {});
+    return getChannelVideosForContext(context);
 };
 
 /**
@@ -236,17 +176,7 @@ source.getChannelContents = function (url, type, order, filters) {
  * @returns {NASAPlaylistPager}
  */
 source.getChannelPlaylists = function (url) {
-    const seriesMatch = url.match(SERIES_URL_REGEX);
-    if (seriesMatch) {
-        return getSeriesAsPlaylist(seriesMatch[1]);
-    }
-
-    const topicMatch = url.match(TOPIC_URL_REGEX);
-    if (topicMatch) {
-        return getTopicSeriesPlaylists(topicMatch[1]);
-    }
-
-    return getSeriesPlaylists();
+    return getChannelPlaylistsForContext(resolveChannelContext(url));
 };
 
 /**
@@ -307,11 +237,12 @@ source.getContentDetails = function (url) {
     const scheduledMatch = url.match(SCHEDULED_VIDEO_URL_REGEX);
     if (scheduledMatch) {
         const slug = scheduledMatch[1];
-        const resp = httpGET({ url: API_BASE_URL + "/scheduled_video?slug=" + encodeURIComponent(slug) + "&_embed=wp:featuredmedia", parseResponse: true });
-        if (!resp.isOk || !resp.body || resp.body.length === 0) {
+        const scheduledVideo = fetchScheduledVideoBySlug(slug);
+        if (!scheduledVideo) {
             throw new ScriptException("Scheduled event not found: " + slug);
         }
-        return buildScheduledVideoDetails(resp.body[0]);
+
+        return buildScheduledVideoDetails(scheduledVideo);
     }
 
     const match = url.match(VIDEO_URL_REGEX);
@@ -320,12 +251,11 @@ source.getContentDetails = function (url) {
     }
 
     const slug = match[1];
-    const resp = httpGET({ url: API_BASE_URL + "/video?slug=" + encodeURIComponent(slug), parseResponse: true });
-    if (!resp.isOk || !resp.body || resp.body.length === 0) {
+    const video = fetchVideoBySlug(slug);
+    if (!video) {
         throw new ScriptException("Video not found: " + slug);
     }
 
-    const video = resp.body[0];
     return buildVideoDetails(video);
 };
 
@@ -338,31 +268,30 @@ source.getContentDetails = function (url) {
 source.getContentRecommendations = function (url) {
     const match = url.match(VIDEO_URL_REGEX);
     if (!match) {
-        return new NASAVideoPager([], false, 1, {});
+        return createEmptyVideoPager();
     }
 
     const slug = match[1];
-    const resp = httpGET({ url: API_BASE_URL + "/video?slug=" + encodeURIComponent(slug), parseResponse: true });
-    if (!resp.isOk || !resp.body || resp.body.length === 0) {
-        return new NASAVideoPager([], false, 1, {});
+    const video = fetchVideoBySlug(slug);
+    if (!video) {
+        return createEmptyVideoPager();
     }
 
-    const video = resp.body[0];
     const relatedVideos = buildRelatedVideos(video);
 
     const seriesIds = video.series;
     if (seriesIds && seriesIds.length > 0) {
         const seriesPage = fetchVideosPage(1, { series: seriesIds[0], exclude: video.id });
-        const seriesIds2 = new Set(relatedVideos.map(function (v) { return v.id.value; }));
-        const deduped = seriesPage.results.filter(function (v) { return !seriesIds2.has(v.id.value); });
+        const relatedVideoIds = new Set(relatedVideos.map(function (v) { return v.id.value; }));
+        const deduped = seriesPage.results.filter(function (v) { return !relatedVideoIds.has(v.id.value); });
         const combined = relatedVideos.concat(deduped);
         return new NASAVideoPager(combined, seriesPage.hasMore, 1, { series: seriesIds[0], exclude: video.id });
     }
 
     if (relatedVideos.length > 0) {
         const latestPage = fetchVideosPage(1, { exclude: video.id });
-        const relatedIds = new Set(relatedVideos.map(function (v) { return v.id.value; }));
-        const deduped = latestPage.results.filter(function (v) { return !relatedIds.has(v.id.value); });
+        const existingRecommendationIds = new Set(relatedVideos.map(function (v) { return v.id.value; }));
+        const deduped = latestPage.results.filter(function (v) { return !existingRecommendationIds.has(v.id.value); });
         const combined = relatedVideos.concat(deduped);
         return new NASAVideoPager(combined, latestPage.hasMore, 1, { exclude: video.id });
     }
@@ -424,23 +353,7 @@ source.searchChannelContents = function (channelUrl, query, type, order, filters
         return new NASASearchPager([], false, query, 1);
     }
 
-    const seriesMatch = channelUrl.match(SERIES_URL_REGEX);
-    if (seriesMatch) {
-        const seriesId = findSeriesIdBySlug(seriesMatch[1]);
-        if (seriesId) {
-            return searchVideos(query, 1, { series: seriesId });
-        }
-    }
-
-    const topicMatch = channelUrl.match(TOPIC_URL_REGEX);
-    if (topicMatch) {
-        const topicId = findTopicIdBySlug(topicMatch[1]);
-        if (topicId) {
-            return searchVideos(query, 1, { topic: topicId });
-        }
-    }
-
-    return searchVideos(query, 1);
+    return searchChannelVideos(resolveChannelContext(channelUrl), query);
 };
 
 /**
@@ -449,14 +362,18 @@ source.searchChannelContents = function (channelUrl, query, type, order, filters
  * @returns {string[]}
  */
 source.searchSuggestions = function (query) {
-    if (!query || query.trim().length === 0) return [];
+    if (!query || query.trim().length === 0) {
+        return [];
+    }
 
     const resp = httpGET({
         url: CUSTOM_API_BASE_URL + "/searchSuggestions/" + encodeURIComponent(query),
         parseResponse: true
     });
 
-    if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) return [];
+    if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) {
+        return [];
+    }
 
     return resp.body.map(function (item) { return item.name; });
 };
@@ -626,20 +543,16 @@ class NASATopicPlaylistPager extends PlaylistPager {
  * @param {Object} options - Request options
  * @param {string} options.url - The URL to fetch
  * @param {boolean} [options.parseResponse=false] - If true, parse response body as JSON
- * @param {Object} [options.headers=null] - Custom headers (overrides defaults)
  * @returns {Object} Response object with isOk, code, body, and headers
  */
 function httpGET(options) {
     const {
         url,
-        parseResponse = false,
-        headers = null
+        parseResponse = false
     } = options;
 
-    const localHeaders = headers ?? REQUEST_HEADERS;
-
     try {
-        const response = http.GET(url, localHeaders, false);
+        const response = http.GET(url, REQUEST_HEADERS, false);
 
         if (!response.isOk) {
             log("HTTP request failed: " + url + " (code: " + response.code + ")");
@@ -668,6 +581,369 @@ function httpGET(options) {
 }
 
 /**
+ * Resolves a channel URL into a reusable context object.
+ * @param {string} url - Channel URL
+ * @returns {Object} Channel context with kind and slug
+ */
+function resolveChannelContext(url) {
+    if (CHANNEL_URL_REGEX.test(url)) {
+        return { kind: "main", slug: "" };
+    }
+
+    const seriesMatch = url.match(SERIES_URL_REGEX);
+    if (seriesMatch) {
+        return { kind: "series", slug: seriesMatch[1] };
+    }
+
+    const topicMatch = url.match(TOPIC_URL_REGEX);
+    if (topicMatch) {
+        return { kind: "topic", slug: topicMatch[1] };
+    }
+
+    return { kind: "unknown", slug: "" };
+}
+
+/**
+ * Resolves the taxonomy ID for a channel context.
+ * @param {Object} context - Channel context
+ * @returns {number|null} Taxonomy ID or null when unavailable
+ */
+function getChannelContextId(context) {
+    if (context.kind === "series") {
+        return findSeriesIdBySlug(context.slug);
+    }
+
+    if (context.kind === "topic") {
+        return findTopicIdBySlug(context.slug);
+    }
+
+    return null;
+}
+
+/**
+ * Creates an empty video pager with the given pagination state.
+ * @param {number} [page=1] - Current page number
+ * @param {Object} [params={}] - Pager query parameters
+ * @returns {NASAVideoPager}
+ */
+function createEmptyVideoPager(page, params) {
+    return new NASAVideoPager([], false, page || 1, params || {});
+}
+
+/**
+ * Returns the channel object for a resolved channel context.
+ * @param {Object} context - Channel context
+ * @returns {PlatformChannel}
+ */
+function getChannelForContext(context) {
+    if (context.kind === "series") {
+        return getSeriesChannel(context.slug);
+    }
+
+    if (context.kind === "topic") {
+        return getTopicChannel(context.slug);
+    }
+
+    return getNASAChannel();
+}
+
+/**
+ * Returns the video feed for a resolved channel context.
+ * @param {Object} context - Channel context
+ * @returns {NASAVideoPager}
+ */
+function getChannelVideosForContext(context) {
+    if (context.kind === "main") {
+        return fetchMainChannelVideos();
+    }
+
+    if (context.kind === "series") {
+        const seriesId = getChannelContextId(context);
+        if (!seriesId) {
+            return createEmptyVideoPager();
+        }
+
+        return fetchVideosPage(1, { series: seriesId });
+    }
+
+    if (context.kind === "topic") {
+        const topicId = getChannelContextId(context);
+        if (!topicId) {
+            return createEmptyVideoPager();
+        }
+
+        return fetchVideosPage(1, { topic: topicId });
+    }
+
+    return fetchVideosPage(1, {});
+}
+
+/**
+ * Returns the playlists feed for a resolved channel context.
+ * @param {Object} context - Channel context
+ * @returns {NASAPlaylistPager|NASATopicPlaylistPager}
+ */
+function getChannelPlaylistsForContext(context) {
+    if (context.kind === "series") {
+        return getSeriesAsPlaylist(context.slug);
+    }
+
+    if (context.kind === "topic") {
+        return getTopicSeriesPlaylists(context.slug);
+    }
+
+    return getSeriesPlaylists();
+}
+
+/**
+ * Searches for videos within a resolved channel context.
+ * @param {Object} context - Channel context
+ * @param {string} query - Search query
+ * @returns {NASASearchPager}
+ */
+function searchChannelVideos(context, query) {
+    if (context.kind === "series") {
+        const seriesId = getChannelContextId(context);
+        if (seriesId) {
+            return searchVideos(query, 1, { series: seriesId });
+        }
+    }
+
+    if (context.kind === "topic") {
+        const topicId = getChannelContextId(context);
+        if (topicId) {
+            return searchVideos(query, 1, { topic: topicId });
+        }
+    }
+
+    return searchVideos(query, 1);
+}
+
+/**
+ * Returns a metadata value as a string.
+ * @param {Object} item - WordPress REST API object
+ * @param {string} key - Metadata key
+ * @returns {string}
+ */
+function getMetaString(item, key) {
+    const value = item.meta?.[key];
+    if (value === undefined || value === null) {
+        return "";
+    }
+
+    return String(value);
+}
+
+/**
+ * Returns a metadata value parsed as an integer.
+ * @param {Object} item - WordPress REST API object
+ * @param {string} key - Metadata key
+ * @returns {number}
+ */
+function getMetaNumber(item, key) {
+    const parsed = parseInt(getMetaString(item, key) || "0");
+    if (isNaN(parsed)) {
+        return 0;
+    }
+
+    return parsed;
+}
+
+/**
+ * Builds the canonical video page URL for a video item.
+ * @param {Object} item - WordPress video REST API object
+ * @returns {string}
+ */
+function buildVideoPageUrl(item) {
+    return item.link || (BASE_URL + "/video/" + item.slug + "/");
+}
+
+/**
+ * Builds the canonical scheduled video page URL for an event item.
+ * @param {Object} item - WordPress scheduled_video REST API object
+ * @returns {string}
+ */
+function buildScheduledVideoPageUrl(item) {
+    return item.link || (BASE_URL + "/scheduled-video/" + item.slug + "/");
+}
+
+/**
+ * Returns the primary HLS URL for a video.
+ * @param {Object} item - WordPress video REST API object
+ * @returns {string}
+ */
+function getVideoStreamUrl(item) {
+    return getMetaString(item, "video-url");
+}
+
+/**
+ * Returns the preview HLS URL for a video.
+ * @param {Object} item - WordPress video REST API object
+ * @returns {string}
+ */
+function getPreviewStreamUrl(item) {
+    return getMetaString(item, "preview-url");
+}
+
+/**
+ * Builds a single HLS source object.
+ * @param {string} name - Source label
+ * @param {number} duration - Source duration in seconds
+ * @param {string} url - HLS playlist URL
+ * @returns {HLSSource}
+ */
+function buildHlsSource(name, duration, url) {
+    return new HLSSource({
+        name: name,
+        duration: duration,
+        url: url
+    });
+}
+
+/**
+ * Builds an on-demand video source descriptor with an optional fallback URL.
+ * @param {string} primaryUrl - Primary HLS URL
+ * @param {string} fallbackUrl - Fallback HLS URL
+ * @param {number} duration - Source duration in seconds
+ * @returns {VideoSourceDescriptor}
+ */
+function buildOnDemandVideoDescriptor(primaryUrl, fallbackUrl, duration) {
+    const sourceUrl = primaryUrl || fallbackUrl;
+    if (!sourceUrl) {
+        return new VideoSourceDescriptor([]);
+    }
+
+    return new VideoSourceDescriptor([
+        buildHlsSource("HLS", duration, sourceUrl)
+    ]);
+}
+
+/**
+ * Fetches a single video by slug.
+ * @param {string} slug - Video slug
+ * @returns {Object|null}
+ */
+function fetchVideoBySlug(slug) {
+    const resp = httpGET({
+        url: API_BASE_URL + "/video?slug=" + encodeURIComponent(slug),
+        parseResponse: true
+    });
+
+    if (!resp.isOk || !resp.body || !Array.isArray(resp.body) || resp.body.length === 0) {
+        return null;
+    }
+
+    return resp.body[0];
+}
+
+/**
+ * Fetches a single scheduled video by slug.
+ * @param {string} slug - Scheduled video slug
+ * @returns {Object|null}
+ */
+function fetchScheduledVideoBySlug(slug) {
+    const resp = httpGET({
+        url: API_BASE_URL + "/scheduled_video?slug=" + encodeURIComponent(slug) + "&_embed=wp:featuredmedia",
+        parseResponse: true
+    });
+
+    if (!resp.isOk || !resp.body || !Array.isArray(resp.body) || resp.body.length === 0) {
+        return null;
+    }
+
+    return resp.body[0];
+}
+
+/**
+ * Builds the shared display fields for a video item.
+ * @param {Object} item - WordPress video REST API object
+ * @returns {Object}
+ */
+function getVideoDisplayData(item) {
+    return {
+        id: new PlatformID(PLATFORM, String(item.id), config.id),
+        title: extractTitle(item),
+        thumbnails: buildThumbnails(item),
+        uploadDate: parseDate(item.date),
+        duration: getMetaNumber(item, "runtime"),
+        url: buildVideoPageUrl(item)
+    };
+}
+
+/**
+ * Builds the shared display fields for a scheduled video item.
+ * @param {Object} item - WordPress scheduled_video REST API object
+ * @param {boolean} isLive - Whether the event is currently live
+ * @returns {Object}
+ */
+function getScheduledDisplayData(item, isLive) {
+    const startTime = getMetaNumber(item, "first_aired_date");
+    const endTime = getMetaNumber(item, "end_aired_date");
+    const eventDuration = (startTime > 0 && endTime > 0) ? endTime - startTime : 0;
+
+    return {
+        id: new PlatformID(PLATFORM, "scheduled-" + String(item.id), config.id),
+        title: extractTitle(item),
+        thumbnails: buildThumbnails({ featured_image: getScheduledThumbnailUrl(item) }),
+        uploadDate: startTime,
+        duration: isLive ? 0 : eventDuration,
+        eventDuration: eventDuration,
+        url: buildScheduledVideoPageUrl(item),
+        startTime: startTime,
+        endTime: endTime
+    };
+}
+
+/**
+ * Classifies a scheduled event relative to the current time.
+ * @param {Object} item - WordPress scheduled_video REST API object
+ * @param {number} [nowSeconds] - Current time in Unix seconds
+ * @returns {Object}
+ */
+function getScheduledEventStatus(item, nowSeconds) {
+    const currentTime = nowSeconds || Math.floor(Date.now() / 1000);
+    const startTime = getMetaNumber(item, "first_aired_date");
+    const endTime = getMetaNumber(item, "end_aired_date");
+    const hasVideoUrl = getVideoStreamUrl(item).length > 0;
+    const isLive = startTime > 0 && currentTime >= startTime && currentTime <= endTime;
+    const isUpcoming = startTime > 0 && currentTime < startTime;
+    const isPast = startTime > 0 && endTime > 0 && currentTime > endTime;
+
+    return {
+        startTime: startTime,
+        endTime: endTime,
+        hasVideoUrl: hasVideoUrl,
+        isLive: isLive,
+        isUpcoming: isUpcoming,
+        isPast: isPast
+    };
+}
+
+/**
+ * Fetches the main channel feed: scheduled events merged with regular videos.
+ * @returns {NASAVideoPager}
+ */
+function fetchMainChannelVideos() {
+    const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia";
+    const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc";
+
+    const batchResults = http.batch()
+        .GET(scheduledUrl, REQUEST_HEADERS, false)
+        .GET(videosUrl, REQUEST_HEADERS, false)
+        .execute();
+
+    const liveVideos = parseScheduledResponse(batchResults[0]);
+    const regularPage = parseVideosResponse(batchResults[1], 1, {});
+
+    if (liveVideos.length > 0) {
+        const combined = liveVideos.concat(regularPage.results);
+        return new NASAVideoPager(combined, regularPage.hasMore, 1, {});
+    }
+
+    return regularPage;
+}
+
+/**
  * Fetches a page of videos from the WordPress REST API.
  * @param {number} page - Page number (1-based)
  * @param {Object} params - Query parameters (series, topic, exclude)
@@ -678,11 +954,19 @@ function fetchVideosPage(page, params) {
     let url = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE
         + "&page=" + page + "&orderby=date&order=" + sortOrder;
 
-    if (params.series) url += "&series=" + params.series;
-    if (params.topic) url += "&topic=" + params.topic;
-    if (params.exclude) url += "&exclude[]=" + params.exclude;
+    if (params.series) {
+        url += "&series=" + params.series;
+    }
 
-    const resp = http.GET(url, REQUEST_HEADERS, false);
+    if (params.topic) {
+        url += "&topic=" + params.topic;
+    }
+
+    if (params.exclude) {
+        url += "&exclude[]=" + params.exclude;
+    }
+
+    const resp = httpGET({ url: url });
     return parseVideosResponse(resp, page, params);
 }
 
@@ -696,19 +980,20 @@ function fetchVideosPage(page, params) {
 function parseVideosResponse(resp, page, params) {
     if (!resp.isOk) {
         log("HTTP request failed (videos): code " + resp.code);
-        return new NASAVideoPager([], false, page, params);
+        return createEmptyVideoPager(page, params);
     }
 
     try {
         const items = JSON.parse(resp.body);
         if (!Array.isArray(items)) {
-            return new NASAVideoPager([], false, page, params);
+            return createEmptyVideoPager(page, params);
         }
+
         const videos = items.map(function (item) { return buildPlatformVideo(item); });
         return new NASAVideoPager(videos, items.length >= ITEMS_PER_PAGE, page, params);
     } catch (e) {
         log("Failed to parse videos response: " + e.message);
-        return new NASAVideoPager([], false, page, params);
+        return createEmptyVideoPager(page, params);
     }
 }
 
@@ -730,8 +1015,13 @@ function searchVideos(query, page, params) {
         + "&page=" + page + "&search=" + encodeURIComponent(query)
         + "&orderby=relevance&order=desc";
 
-    if (params.series) url += "&series=" + params.series;
-    if (params.topic) url += "&topic=" + params.topic;
+    if (params.series) {
+        url += "&series=" + params.series;
+    }
+
+    if (params.topic) {
+        url += "&topic=" + params.topic;
+    }
 
     const resp = httpGET({ url: url, parseResponse: true });
     if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) {
@@ -750,19 +1040,17 @@ function searchVideos(query, page, params) {
  * @returns {PlatformVideo}
  */
 function buildPlatformVideo(item) {
-    const runtime = parseInt(item.meta?.["runtime"] || "0");
-    const title = extractTitle(item);
-    const isPreview = runtime > 0 && runtime < PREVIEW_RUNTIME_THRESHOLD && !title.toLowerCase().includes("trailer");
+    const videoData = getVideoDisplayData(item);
 
     return new PlatformVideo({
-        id: new PlatformID(PLATFORM, String(item.id), config.id),
-        name: isPreview ? title + " (preview)" : title,
-        thumbnails: buildThumbnails(item),
+        id: videoData.id,
+        name: videoData.title,
+        thumbnails: videoData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: parseDate(item.date),
-        duration: runtime,
+        uploadDate: videoData.uploadDate,
+        duration: videoData.duration,
         viewCount: 0,
-        url: item.link || (BASE_URL + "/video/" + item.slug + "/"),
+        url: videoData.url,
         isLive: false
     });
 }
@@ -773,53 +1061,28 @@ function buildPlatformVideo(item) {
  * @returns {PlatformVideoDetails}
  */
 function buildVideoDetails(item) {
-    const runtime = parseInt(item.meta?.["runtime"] || "0");
-    const videoUrl = item.meta?.["video-url"] || "";
-    const previewUrl = item.meta?.["preview-url"] || "";
-    const title = extractTitle(item);
-    const isPreview = runtime > 0 && runtime < PREVIEW_RUNTIME_THRESHOLD && !title.toLowerCase().includes("trailer");
-
-    if (isPreview && settings.showPreviewToast !== false) {
-        bridge.toast("Playing " + runtime + "-second preview. Disable this notification in plugin settings.");
-    }
-
-    const sources = [];
-    if (videoUrl) {
-        sources.push(new HLSSource({
-            name: "HLS",
-            duration: runtime,
-            url: videoUrl
-        }));
-    }
-
-    if (sources.length === 0 && previewUrl) {
-        sources.push(new HLSSource({
-            name: "Preview",
-            duration: runtime,
-            url: previewUrl
-        }));
-    }
-
+    const videoData = getVideoDisplayData(item);
     const description = buildDescription(item);
 
     const fields = {
-        id: new PlatformID(PLATFORM, String(item.id), config.id),
-        name: isPreview ? title + " (preview)" : title,
-        thumbnails: buildThumbnails(item),
+        id: videoData.id,
+        name: videoData.title,
+        thumbnails: videoData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: parseDate(item.date),
-        duration: runtime,
+        uploadDate: videoData.uploadDate,
+        duration: videoData.duration,
         viewCount: 0,
-        url: item.link || (BASE_URL + "/video/" + item.slug + "/"),
+        url: videoData.url,
         isLive: false,
         description: description,
-        video: new VideoSourceDescriptor(sources)
+        video: buildOnDemandVideoDescriptor(getVideoStreamUrl(item), getPreviewStreamUrl(item), videoData.duration)
     };
 
     const result = new PlatformVideoDetails(fields);
     result.getContentRecommendations = function () {
-        return source.getContentRecommendations(item.link || (BASE_URL + "/video/" + item.slug + "/"));
+        return source.getContentRecommendations(videoData.url);
     };
+
     return result;
 }
 
@@ -842,40 +1105,91 @@ function buildDescription(item) {
     const parts = [];
 
     const content = extractContent(item);
-    if (content) parts.push(content);
+    if (content) {
+        parts.push(content);
+    }
 
-    const rating = item.meta?.["rating"];
-    if (rating) parts.push("Rating: " + rating);
+    appendNonEmptyLines(parts, [
+        buildLabelValueLine("Rating", getMetaString(item, "rating")),
+        buildEpisodeLine(item),
+        buildLabelValueLine("Featuring", getMetaString(item, "featuring")),
+        buildLabelValueLine("Narrated by", getMetaString(item, "narrated-by")),
+        buildLabelValueLine("Language", getMetaString(item, "language") || getMetaString(item, "Language"))
+    ]);
 
-    const episode = item.meta?.["episode-num"];
-    const season = item.meta?.["season"];
-    if (season && episode) parts.push("Season " + season + ", Episode " + episode);
-    else if (episode) parts.push("Episode " + episode);
-
-    const featuring = item.meta?.["featuring"];
-    if (featuring) parts.push("Featuring: " + featuring);
-
-    const narratedBy = item.meta?.["narrated-by"];
-    if (narratedBy) parts.push("Narrated by: " + narratedBy);
-
-    const language = item.meta?.["language"] || item.meta?.["Language"];
-    if (language) parts.push("Language: " + language);
-
-    const seriesIds = item.series;
-    if (seriesIds && seriesIds.length > 0) {
-
-        parts.push("\n");
-
-        const allSeries = fetchAllSeries();
-        for (let i = 0; i < allSeries.length; i++) {
-            if (allSeries[i].id === seriesIds[0]) {
-                parts.push(allSeries[i].name + " - " + BASE_URL + "/series/" + allSeries[i].slug + "/");
-                break;
-            }
-        }
+    const primarySeriesLine = buildPrimarySeriesLine(item.series);
+    if (primarySeriesLine) {
+        parts.push("");
+        parts.push(primarySeriesLine);
     }
 
     return parts.join("\n");
+}
+
+/**
+ * Appends all non-empty lines to a description parts array.
+ * @param {string[]} parts - Target description parts
+ * @param {string[]} lines - Optional lines to append
+ */
+function appendNonEmptyLines(parts, lines) {
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i]) {
+            parts.push(lines[i]);
+        }
+    }
+}
+
+/**
+ * Builds a "Label: Value" line when a value is present.
+ * @param {string} label - Display label
+ * @param {string} value - Display value
+ * @returns {string}
+ */
+function buildLabelValueLine(label, value) {
+    if (!value) {
+        return "";
+    }
+
+    return label + ": " + value;
+}
+
+/**
+ * Builds a season/episode line from video metadata.
+ * @param {Object} item - WordPress video REST API object
+ * @returns {string}
+ */
+function buildEpisodeLine(item) {
+    const episode = getMetaString(item, "episode-num");
+    const season = getMetaString(item, "season");
+    if (season && episode) {
+        return "Season " + season + ", Episode " + episode;
+    }
+
+    if (episode) {
+        return "Episode " + episode;
+    }
+
+    return "";
+}
+
+/**
+ * Builds the first matching series link line for a video.
+ * @param {number[]} seriesIds - Series taxonomy IDs
+ * @returns {string}
+ */
+function buildPrimarySeriesLine(seriesIds) {
+    if (!seriesIds || seriesIds.length === 0) {
+        return "";
+    }
+
+    const allSeries = fetchAllSeries();
+    for (let i = 0; i < allSeries.length; i++) {
+        if (allSeries[i].id === seriesIds[0]) {
+            return allSeries[i].name + " - " + BASE_URL + "/series/" + allSeries[i].slug + "/";
+        }
+    }
+
+    return "";
 }
 
 /**
@@ -885,7 +1199,10 @@ function buildDescription(item) {
  */
 function buildThumbnails(item) {
     const imageUrl = item.featured_image || "";
-    if (!imageUrl) return new Thumbnails([]);
+    if (!imageUrl) {
+        return new Thumbnails([]);
+    }
+
     return new Thumbnails([new Thumbnail(imageUrl, 0)]);
 }
 
@@ -895,9 +1212,16 @@ function buildThumbnails(item) {
  * @returns {number} Unix timestamp in seconds, or 0 if parsing fails
  */
 function parseDate(dateStr) {
-    if (!dateStr) return 0;
+    if (!dateStr) {
+        return 0;
+    }
+
     const ts = new Date(dateStr).getTime();
-    return isNaN(ts) ? 0 : Math.floor(ts / 1000);
+    if (isNaN(ts)) {
+        return 0;
+    }
+
+    return Math.floor(ts / 1000);
 }
 
 /**
@@ -917,7 +1241,10 @@ function extractTitle(item) {
  * @returns {string} Decoded text
  */
 function decodeHtmlEntities(text) {
-    if (!text) return "";
+    if (!text) {
+        return "";
+    }
+
     return text
         .replace(/&#(\d+);/g, function (match, dec) { return String.fromCharCode(dec); })
         .replace(/&#x([0-9a-fA-F]+);/g, function (match, hex) { return String.fromCharCode(parseInt(hex, 16)); })
@@ -1067,8 +1394,11 @@ function fetchAllTopics() {
 function findSeriesBySlug(slug) {
     const allSeries = fetchAllSeries();
     for (let i = 0; i < allSeries.length; i++) {
-        if (allSeries[i].slug === slug) return allSeries[i];
+        if (allSeries[i].slug === slug) {
+            return allSeries[i];
+        }
     }
+
     return null;
 }
 
@@ -1079,7 +1409,11 @@ function findSeriesBySlug(slug) {
  */
 function findSeriesIdBySlug(slug) {
     const series = findSeriesBySlug(slug);
-    return series ? series.id : null;
+    if (!series) {
+        return null;
+    }
+
+    return series.id;
 }
 
 /**
@@ -1090,8 +1424,11 @@ function findSeriesIdBySlug(slug) {
 function findTopicIdBySlug(slug) {
     const allTopics = fetchAllTopics();
     for (let i = 0; i < allTopics.length; i++) {
-        if (allTopics[i].slug === slug) return allTopics[i].id;
+        if (allTopics[i].slug === slug) {
+            return allTopics[i].id;
+        }
     }
+
     return null;
 }
 
@@ -1105,6 +1442,7 @@ function getSeriesAsPlaylist(slug) {
     if (series) {
         return new NASAPlaylistPager([buildSeriesPlaylist(series)], false, []);
     }
+
     return new NASAPlaylistPager([], false, []);
 }
 
@@ -1175,8 +1513,13 @@ function fetchTopicSeriesPage(topicId, page, seenSeriesIds) {
         .map(function (s) { return buildSeriesPlaylist(s); });
 
     const updatedSeen = {};
-    for (var k in seenSeriesIds) updatedSeen[k] = true;
-    for (var k2 in newSeriesIds) updatedSeen[k2] = true;
+    for (const k in seenSeriesIds) {
+        updatedSeen[k] = true;
+    }
+
+    for (const k2 in newSeriesIds) {
+        updatedSeen[k2] = true;
+    }
 
     const hasMoreVideoPages = resp.body.length >= 100;
     return new NASATopicPlaylistPager(playlists, hasMoreVideoPages, topicId, page, updatedSeen);
@@ -1199,23 +1542,15 @@ function buildSeriesPlaylist(series) {
 }
 
 /**
- * Fetches scheduled videos and returns live/upcoming ones as PlatformVideo objects.
- * Sorted: live events first, then upcoming events by start time ascending.
- * @returns {PlatformVideo[]}
- */
-function fetchScheduledVideos() {
-    const resp = http.GET(API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia", REQUEST_HEADERS, false);
-    return parseScheduledResponse(resp);
-}
-
-/**
- * Parses a raw HTTP response into an array of live/upcoming PlatformVideo objects.
- * Sorted: live events first, then upcoming events by start time ascending.
+ * Parses a raw HTTP response into an array of scheduled PlatformVideo objects.
+ * Sorted: live events first, upcoming events second, past events third.
  * @param {Object} resp - Raw HTTP response
  * @returns {PlatformVideo[]}
  */
 function parseScheduledResponse(resp) {
-    if (!resp.isOk) return [];
+    if (!resp.isOk) {
+        return [];
+    }
 
     let items;
     try {
@@ -1224,30 +1559,64 @@ function parseScheduledResponse(resp) {
         log("Failed to parse scheduled response: " + e.message);
         return [];
     }
-    if (!Array.isArray(items)) return [];
+
+    if (!Array.isArray(items)) {
+        return [];
+    }
 
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const results = [];
+    const entries = [];
 
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
-        const startTime = parseInt(item.meta?.["first_aired_date"] || "0");
-        const endTime = parseInt(item.meta?.["end_aired_date"] || "0");
-        const isLive = startTime > 0 && nowSeconds >= startTime && nowSeconds <= endTime;
-        const isUpcoming = startTime > 0 && nowSeconds < startTime;
+        const status = getScheduledEventStatus(item, nowSeconds);
+        const shouldInclude = status.isLive || status.isUpcoming || (status.isPast && status.hasVideoUrl);
 
-        if (isLive || isUpcoming) {
-            results.push(buildScheduledPlatformVideo(item, isLive));
+        if (shouldInclude) {
+            entries.push({
+                video: buildScheduledPlatformVideo(item, status),
+                status: status
+            });
         }
     }
 
-    results.sort(function (a, b) {
-        if (a.isLive && !b.isLive) return -1;
-        if (!a.isLive && b.isLive) return 1;
-        return (a.datetime || 0) - (b.datetime || 0);
+    entries.sort(function (a, b) {
+        if (a.status.isLive && !b.status.isLive) {
+            return -1;
+        }
+
+        if (!a.status.isLive && b.status.isLive) {
+            return 1;
+        }
+
+        if (a.status.isUpcoming && !b.status.isUpcoming) {
+            return -1;
+        }
+
+        if (!a.status.isUpcoming && b.status.isUpcoming) {
+            return 1;
+        }
+
+        if (a.status.isUpcoming && b.status.isUpcoming) {
+            return a.status.startTime - b.status.startTime;
+        }
+
+        if (a.status.isPast && !b.status.isPast) {
+            return 1;
+        }
+
+        if (!a.status.isPast && b.status.isPast) {
+            return -1;
+        }
+
+        if (a.status.isPast && b.status.isPast) {
+            return b.status.endTime - a.status.endTime;
+        }
+
+        return (a.video.uploadDate || 0) - (b.video.uploadDate || 0);
     });
 
-    return results;
+    return entries.map(function (entry) { return entry.video; });
 }
 
 /**
@@ -1262,25 +1631,22 @@ function getScheduledThumbnailUrl(item) {
 /**
  * Builds a PlatformVideo from a scheduled video object.
  * @param {Object} item - WordPress scheduled_video REST API object
- * @param {boolean} isLive - Whether the event is currently live
+ * @param {Object} status - Scheduled event status object
  * @returns {PlatformVideo}
  */
-function buildScheduledPlatformVideo(item, isLive) {
-    const title = extractTitle(item);
-    const startTime = parseInt(item.meta?.["first_aired_date"] || "0");
-    const endTime = parseInt(item.meta?.["end_aired_date"] || "0");
-    const duration = (startTime > 0 && endTime > 0) ? endTime - startTime : 0;
+function buildScheduledPlatformVideo(item, status) {
+    const scheduledData = getScheduledDisplayData(item, status.isLive);
 
     return new PlatformVideo({
-        id: new PlatformID(PLATFORM, "scheduled-" + String(item.id), config.id),
-        name: title,
-        thumbnails: buildThumbnails({ featured_image: getScheduledThumbnailUrl(item) }),
+        id: scheduledData.id,
+        name: scheduledData.title,
+        thumbnails: scheduledData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: startTime,
-        duration: isLive ? 0 : duration,
+        uploadDate: scheduledData.uploadDate,
+        duration: scheduledData.duration,
         viewCount: 0,
-        url: item.link || (BASE_URL + "/scheduled-video/" + item.slug + "/"),
-        isLive: isLive
+        url: scheduledData.url,
+        isLive: status.isLive
     });
 }
 
@@ -1290,42 +1656,28 @@ function buildScheduledPlatformVideo(item, isLive) {
  * @returns {PlatformVideoDetails}
  */
 function buildScheduledVideoDetails(item) {
-    const title = extractTitle(item);
-    const videoUrl = item.meta?.["video-url"] || "";
-    const startTime = parseInt(item.meta?.["first_aired_date"] || "0");
-    const endTime = parseInt(item.meta?.["end_aired_date"] || "0");
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const isLive = startTime > 0 && nowSeconds >= startTime && nowSeconds <= endTime;
-    const duration = (startTime > 0 && endTime > 0) ? endTime - startTime : 0;
+    const status = getScheduledEventStatus(item);
+    const videoUrl = getVideoStreamUrl(item);
+    const scheduledData = getScheduledDisplayData(item, status.isLive);
 
     const fields = {
-        id: new PlatformID(PLATFORM, "scheduled-" + String(item.id), config.id),
-        name: title,
-        thumbnails: buildThumbnails({ featured_image: getScheduledThumbnailUrl(item) }),
+        id: scheduledData.id,
+        name: scheduledData.title,
+        thumbnails: scheduledData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: startTime,
-        duration: isLive ? 0 : duration,
+        uploadDate: scheduledData.uploadDate,
+        duration: scheduledData.duration,
         viewCount: 0,
-        url: item.link || (BASE_URL + "/scheduled-video/" + item.slug + "/"),
-        isLive: isLive,
+        url: scheduledData.url,
+        isLive: status.isLive,
         description: extractContent(item),
         video: new VideoSourceDescriptor([])
     };
 
-    if (isLive && videoUrl) {
-        fields.live = new HLSSource({
-            name: "Live",
-            duration: 0,
-            url: videoUrl
-        });
+    if (status.isLive && videoUrl) {
+        fields.live = buildHlsSource("Live", 0, videoUrl);
     } else if (videoUrl) {
-        fields.video = new VideoSourceDescriptor([
-            new HLSSource({
-                name: "HLS",
-                duration: duration,
-                url: videoUrl
-            })
-        ]);
+        fields.video = buildOnDemandVideoDescriptor(videoUrl, "", scheduledData.eventDuration);
     }
 
     return new PlatformVideoDetails(fields);
@@ -1337,19 +1689,22 @@ function buildScheduledVideoDetails(item) {
  * @returns {PlatformVideo[]}
  */
 function buildRelatedVideos(video) {
-    if (!video.related_videos || !Array.isArray(video.related_videos)) return [];
+    if (!video.related_videos || !Array.isArray(video.related_videos)) {
+        return [];
+    }
 
     return video.related_videos
         .filter(function (rv) { return rv.ID !== video.id && rv.permalink; })
         .map(function (rv) {
-            const runtime = parseInt(rv.meta?.["runtime"] || "0");
+            const runtime = getMetaNumber(rv, "runtime");
             const title = decodeHtmlEntities(rv.post_title || "");
+            const relatedThumbnailUrl = getMetaString(rv, "featured-image");
 
             return new PlatformVideo({
                 id: new PlatformID(PLATFORM, String(rv.ID), config.id),
                 name: title,
-                thumbnails: rv.meta?.["featured-image"]
-                    ? new Thumbnails([new Thumbnail(rv.meta["featured-image"], 0)])
+                thumbnails: relatedThumbnailUrl
+                    ? new Thumbnails([new Thumbnail(relatedThumbnailUrl, 0)])
                     : new Thumbnails([]),
                 author: nasaAuthor(),
                 uploadDate: parseDate(rv.post_date_gmt),
