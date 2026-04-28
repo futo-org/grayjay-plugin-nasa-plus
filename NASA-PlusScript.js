@@ -388,15 +388,9 @@ source.searchPlaylists = function (query) {
         return new NASAPlaylistPager([], false, []);
     }
 
-    const allSeries = fetchAllSeries();
     const lowerQuery = query.toLowerCase();
-    const playlists = allSeries
-        .filter(function (s) {
-            return s.count > 0 && (
-                s.name.toLowerCase().indexOf(lowerQuery) !== -1 ||
-                (s.description && s.description.toLowerCase().indexOf(lowerQuery) !== -1)
-            );
-        })
+    const playlists = fetchAllSeries()
+        .filter(function (s) { return s.count > 0 && taxonomyMatchesQuery(s, lowerQuery); })
         .sort(function (a, b) { return (b.count || 0) - (a.count || 0); })
         .map(function (s) { return buildSeriesPlaylist(s); });
 
@@ -404,7 +398,7 @@ source.searchPlaylists = function (query) {
 };
 
 /**
- * Searches for channels (series) matching the query.
+ * Searches for channels (series and topics) matching the query.
  * @param {string} query - Search query
  * @returns {NASASeriesSearchPager}
  */
@@ -413,15 +407,17 @@ source.searchChannels = function (query) {
         return new NASASeriesSearchPager([], false);
     }
 
-    const allSeries = fetchAllSeries();
     const lowerQuery = query.toLowerCase();
-    const matches = allSeries.filter(function (s) {
-        return s.name.toLowerCase().indexOf(lowerQuery) !== -1 ||
-            (s.description && s.description.toLowerCase().indexOf(lowerQuery) !== -1);
-    });
 
-    const channels = matches.map(function (s) { return buildSeriesChannelFromTaxonomy(s); });
-    return new NASASeriesSearchPager(channels, false);
+    const seriesChannels = fetchAllSeries()
+        .filter(function (s) { return taxonomyMatchesQuery(s, lowerQuery); })
+        .map(function (s) { return buildSeriesChannelFromTaxonomy(s); });
+
+    const topicChannels = fetchAllTopics()
+        .filter(function (t) { return taxonomyMatchesQuery(t, lowerQuery); })
+        .map(function (t) { return buildTopicChannelFromTaxonomy(t); });
+
+    return new NASASeriesSearchPager(seriesChannels.concat(topicChannels), false);
 };
 
 // ==========================================================================
@@ -475,7 +471,7 @@ class NASASearchPager extends VideoPager {
 }
 
 /**
- * Pager for series search results (non-paginated).
+ * Pager for channel search results (series and topics, non-paginated).
  * @extends ChannelPager
  */
 class NASASeriesSearchPager extends ChannelPager {
@@ -1322,6 +1318,35 @@ function buildSeriesChannelFromTaxonomy(series) {
 }
 
 /**
+ * Builds a PlatformChannel from a topic taxonomy object.
+ * @param {Object} topic - WordPress taxonomy term object
+ * @returns {PlatformChannel}
+ */
+function buildTopicChannelFromTaxonomy(topic) {
+    return new PlatformChannel({
+        id: new PlatformID(PLATFORM, "topic-" + topic.slug, config.id),
+        name: topic.name,
+        thumbnail: CHANNEL_THUMBNAIL_URL,
+        banner: "",
+        subscribers: 0,
+        description: topic.description || "",
+        url: BASE_URL + "/topics/" + topic.slug + "/",
+        links: {}
+    });
+}
+
+/**
+ * Case-insensitive match against a taxonomy term's name or description.
+ * @param {Object} item - Taxonomy term with name and optional description
+ * @param {string} lowerQuery - Pre-lowercased query string
+ * @returns {boolean}
+ */
+function taxonomyMatchesQuery(item, lowerQuery) {
+    return item.name.toLowerCase().indexOf(lowerQuery) !== -1 ||
+        (item.description && item.description.toLowerCase().indexOf(lowerQuery) !== -1);
+}
+
+/**
  * Returns a channel for a NASA+ topic.
  * @param {string} slug - Topic slug
  * @returns {PlatformChannel}
@@ -1336,16 +1361,7 @@ function getTopicChannel(slug) {
         }
     }
 
-    return new PlatformChannel({
-        id: new PlatformID(PLATFORM, "topic-" + slug, config.id),
-        name: topic ? topic.name : slug,
-        thumbnail: CHANNEL_THUMBNAIL_URL,
-        banner: "",
-        subscribers: 0,
-        description: topic ? (topic.description || "") : "",
-        url: BASE_URL + "/topics/" + slug + "/",
-        links: {}
-    });
+    return buildTopicChannelFromTaxonomy(topic || { slug: slug, name: slug, description: "" });
 }
 
 /**
