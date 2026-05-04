@@ -1,8 +1,8 @@
 {
   "id": "a1b2c3d4-5e6f-7890-abcd-ef1234567890",
-  "name": "NASA+ (Alpha)",
+  "name": "NASA+",
   "description": "Explore the unknown in air and space. Watch original series, documentaries, and features from NASA's streaming service.",
-  "version": 4,
+  "version": 5,
   "author": "FUTO",
   "authorUrl": "https://futo.tech",
   "platformUrl": "https://plus.nasa.gov",
@@ -38,6 +38,13 @@
     }
   },
   "changelog": {
+    "5": [
+      "Fix: Live event detection when end time is unknown;",
+      "Fix: Hide empty series and topics from channel search results;",
+      "Fix: Use GMT timestamps so upload dates are consistent across timezones;",
+      "Improvement: Reliable pagination via WordPress _envelope responses;",
+      "Improvement: Decode additional HTML entities in titles and descriptions;"
+    ],
     "4": [
       "Improvement: Show past live events;"
     ],
@@ -46,9 +53,9 @@
       "Improvement: Add series information to video descriptions;"
     ],
     "2": [
-      "Fix missing thumbnails on scheduled/live videos;",
-      "Show live/upcoming events on NASA channel page;",
-      "Add thumbnails to series playlists;"
+      "Fix: Missing thumbnails on scheduled/live videos;",
+      "Improvement: Show live/upcoming events on NASA channel page;",
+      "Improvement: Add thumbnails to series playlists;"
     ],
     "1": [
       "Initial implementation;"
