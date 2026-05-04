@@ -6,7 +6,6 @@ const PLATFORM = "NASA+";
 const BASE_URL = "https://plus.nasa.gov";
 const API_BASE_URL = "https://plus.nasa.gov/wp-json/wp/v2";
 const CUSTOM_API_BASE_URL = "https://plus.nasa.gov/wp-json/nasaplus/v1";
-const CHANNEL_THUMBNAIL_URL = "https://www.nasa.gov/wp-content/themes/nasa/assets/images/nasa-logo@2x.png";
 const CHANNEL_DESCRIPTION = "NASA+ is NASA's on-demand streaming service. Watch original series, live coverage, and explore NASA's missions across air and space.";
 const PLUGIN_ICON_URL = "https://plugins.grayjay.app/NASA-Plus/NASA-PlusIcon.png";
 
@@ -16,6 +15,8 @@ const REQUEST_HEADERS = {
 };
 
 const ITEMS_PER_PAGE = 20;
+const MAX_PER_PAGE = 100;
+const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 
 Type.Feed.Playlists = "Playlists";
 
@@ -65,8 +66,6 @@ let state = {
     seriesFetchedAt: 0
 };
 
-const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
-
 // ==========================================================================
 // Source Functions
 // ==========================================================================
@@ -102,18 +101,6 @@ source.enable = function (conf, sett, savedStateStr) {
             log("Failed to parse saved state: " + e.message);
         }
     }
-};
-
-/**
- * Serializes plugin state for persistence across sessions.
- * @returns {string} JSON string of the current state
- */
-source.saveState = function () {
-    if (IS_TESTING) {
-        return "";
-    }
-
-    return JSON.stringify(state);
 };
 
 /**
@@ -159,7 +146,7 @@ source.getChannelCapabilities = function () {
  * @param {string} type - Content type (Videos or Playlists)
  * @param {string} order - Sort order
  * @param {Object} filters - Content filters
- * @returns {NASAVideoPager|NASAPlaylistPager}
+ * @returns {NASAVideoPager|NASAPlaylistPager|NASATopicPlaylistPager}
  */
 source.getChannelContents = function (url, type, order, filters) {
     const context = resolveChannelContext(url);
@@ -173,7 +160,7 @@ source.getChannelContents = function (url, type, order, filters) {
 /**
  * Returns playlists for the NASA+ channel (all series).
  * @param {string} url - Channel URL
- * @returns {NASAPlaylistPager}
+ * @returns {NASAPlaylistPager|NASATopicPlaylistPager}
  */
 source.getChannelPlaylists = function (url) {
     return getChannelPlaylistsForContext(resolveChannelContext(url));
@@ -212,6 +199,7 @@ source.getPlaylist = function (url) {
         id: new PlatformID(PLATFORM, "series-" + slug, config.id),
         name: seriesObj.name,
         author: nasaAuthor(),
+        datetime: Math.floor(Date.now() / 1000),
         url: BASE_URL + "/series/" + slug + "/",
         thumbnail: "",
         videoCount: seriesObj.count || -1,
@@ -349,11 +337,12 @@ source.getSearchChannelContentsCapabilities = function () {
  * @returns {NASASearchPager}
  */
 source.searchChannelContents = function (channelUrl, query, type, order, filters) {
-    if (!query || query.trim().length === 0) {
-        return new NASASearchPager([], false, query, 1);
+    const trimmed = (query || "").trim();
+    if (trimmed.length === 0) {
+        return new NASASearchPager([], false, trimmed, 1);
     }
 
-    return searchChannelVideos(resolveChannelContext(channelUrl), query);
+    return searchChannelVideos(resolveChannelContext(channelUrl), trimmed);
 };
 
 /**
@@ -410,14 +399,26 @@ source.searchChannels = function (query) {
     const lowerQuery = query.toLowerCase();
 
     const seriesChannels = fetchAllSeries()
-        .filter(function (s) { return taxonomyMatchesQuery(s, lowerQuery); })
+        .filter(function (s) { return s.count > 0 && taxonomyMatchesQuery(s, lowerQuery); })
         .map(function (s) { return buildSeriesChannelFromTaxonomy(s); });
 
     const topicChannels = fetchAllTopics()
-        .filter(function (t) { return taxonomyMatchesQuery(t, lowerQuery); })
+        .filter(function (t) { return t.count > 0 && taxonomyMatchesQuery(t, lowerQuery); })
         .map(function (t) { return buildTopicChannelFromTaxonomy(t); });
 
     return new NASASeriesSearchPager(seriesChannels.concat(topicChannels), false);
+};
+
+/**
+ * Serializes plugin state for persistence across sessions.
+ * @returns {string} JSON string of the current state
+ */
+source.saveState = function () {
+    if (IS_TESTING) {
+        return "";
+    }
+
+    return JSON.stringify(state);
 };
 
 // ==========================================================================
@@ -475,6 +476,10 @@ class NASASearchPager extends VideoPager {
  * @extends ChannelPager
  */
 class NASASeriesSearchPager extends ChannelPager {
+    /**
+     * @param {PlatformChannel[]} results - Series and topic channels matching the query
+     * @param {boolean} hasMore - Whether more pages are available
+     */
     constructor(results, hasMore) {
         super(results, hasMore);
     }
@@ -516,7 +521,7 @@ class NASATopicPlaylistPager extends PlaylistPager {
      * @param {boolean} hasMore - Whether more video pages remain to scan
      * @param {number} topicId - Topic taxonomy ID
      * @param {number} videoPage - Current video page number
-     * @param {Object} seenSeriesIds - Map of already-returned series IDs
+     * @param {Object} seenSeriesIds - Set-like object keyed by already-returned series IDs
      */
     constructor(results, hasMore, topicId, videoPage, seenSeriesIds) {
         super(results, hasMore);
@@ -606,7 +611,8 @@ function resolveChannelContext(url) {
  */
 function getChannelContextId(context) {
     if (context.kind === "series") {
-        return findSeriesIdBySlug(context.slug);
+        const series = findSeriesBySlug(context.slug);
+        return series ? series.id : null;
     }
 
     if (context.kind === "topic") {
@@ -737,7 +743,7 @@ function getMetaString(item, key) {
  * @returns {number}
  */
 function getMetaNumber(item, key) {
-    const parsed = parseInt(getMetaString(item, key) || "0");
+    const parsed = parseInt(getMetaString(item, key) || "0", 10);
     if (isNaN(parsed)) {
         return 0;
     }
@@ -860,7 +866,7 @@ function getVideoDisplayData(item) {
         id: new PlatformID(PLATFORM, String(item.id), config.id),
         title: extractTitle(item),
         thumbnails: buildThumbnails(item),
-        uploadDate: parseDate(item.date),
+        uploadDate: parseDate(item.date_gmt || item.date),
         duration: getMetaNumber(item, "runtime"),
         url: buildVideoPageUrl(item)
     };
@@ -901,7 +907,7 @@ function getScheduledEventStatus(item, nowSeconds) {
     const startTime = getMetaNumber(item, "first_aired_date");
     const endTime = getMetaNumber(item, "end_aired_date");
     const hasVideoUrl = getVideoStreamUrl(item).length > 0;
-    const isLive = startTime > 0 && currentTime >= startTime && currentTime <= endTime;
+    const isLive = startTime > 0 && currentTime >= startTime && (endTime === 0 || currentTime <= endTime);
     const isUpcoming = startTime > 0 && currentTime < startTime;
     const isPast = startTime > 0 && endTime > 0 && currentTime > endTime;
 
@@ -917,11 +923,12 @@ function getScheduledEventStatus(item, nowSeconds) {
 
 /**
  * Fetches the main channel feed: scheduled events merged with regular videos.
+ * Scheduled events are capped at ITEMS_PER_PAGE (single non-paginated request) since NASA only schedules a handful at a time.
  * @returns {NASAVideoPager}
  */
 function fetchMainChannelVideos() {
-    const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=20&orderby=date&order=desc&_embed=wp:featuredmedia";
-    const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc";
+    const scheduledUrl = API_BASE_URL + "/scheduled_video?per_page=" + ITEMS_PER_PAGE + "&orderby=date&order=desc&_embed=wp:featuredmedia";
+    const videosUrl = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE + "&page=1&orderby=date&order=desc&_envelope=1";
 
     const batchResults = http.batch()
         .GET(scheduledUrl, REQUEST_HEADERS, false)
@@ -948,7 +955,7 @@ function fetchMainChannelVideos() {
 function fetchVideosPage(page, params) {
     const sortOrder = params.order || "desc";
     let url = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE
-        + "&page=" + page + "&orderby=date&order=" + sortOrder;
+        + "&page=" + page + "&orderby=date&order=" + sortOrder + "&_envelope=1";
 
     if (params.series) {
         url += "&series=" + params.series;
@@ -967,8 +974,55 @@ function fetchVideosPage(page, params) {
 }
 
 /**
- * Parses a raw HTTP response into a NASAVideoPager.
- * @param {Object} resp - Raw HTTP response
+ * Reads X-WP-TotalPages from an envelope, defaulting to 1 when unavailable.
+ * @param {Object} envelope - Parsed envelope with shape { body, status, headers }
+ * @returns {number}
+ */
+function getEnvelopeTotalPages(envelope) {
+    if (!envelope || !envelope.headers) {
+        return 1;
+    }
+
+    const headers = envelope.headers;
+    const matchingKey = Object.keys(headers).find(function (k) {
+        return k.toLowerCase() === "x-wp-totalpages";
+    });
+    if (!matchingKey) {
+        return 1;
+    }
+
+    const parsed = parseInt(headers[matchingKey], 10);
+    return isNaN(parsed) || parsed < 1 ? 1 : parsed;
+}
+
+/**
+ * Extracts items and total page count from a WordPress _envelope=1 response.
+ *
+ * The _envelope global parameter (https://developer.wordpress.org/rest-api/using-the-rest-api/global-parameters/#_envelope)
+ * embeds the original response headers in the JSON body, bypassing the Grayjay header whitelist that would otherwise drop X-WP-TotalPages.
+ * Accepts both pre-parsed (parseResponse: true) and raw (string body) responses.
+ *
+ * @param {Object} resp - HTTP response carrying an envelope-wrapped body
+ * @returns {{items: Array|null, totalPages: number}}
+ */
+function unwrapEnvelope(resp) {
+    let envelope = resp ? resp.body : null;
+    if (typeof envelope === "string") {
+        try {
+            envelope = JSON.parse(envelope);
+        } catch (e) {
+            log("Failed to parse envelope: " + e.message);
+            return { items: null, totalPages: 1 };
+        }
+    }
+
+    const items = envelope && Array.isArray(envelope.body) ? envelope.body : null;
+    return { items: items, totalPages: getEnvelopeTotalPages(envelope) };
+}
+
+/**
+ * Parses a raw HTTP response (with _envelope=1) into a NASAVideoPager.
+ * @param {Object} resp - Raw HTTP response carrying an envelope-wrapped body
  * @param {number} page - Current page number
  * @param {Object} params - Query parameters for pagination
  * @returns {NASAVideoPager}
@@ -979,18 +1033,13 @@ function parseVideosResponse(resp, page, params) {
         return createEmptyVideoPager(page, params);
     }
 
-    try {
-        const items = JSON.parse(resp.body);
-        if (!Array.isArray(items)) {
-            return createEmptyVideoPager(page, params);
-        }
-
-        const videos = items.map(function (item) { return buildPlatformVideo(item); });
-        return new NASAVideoPager(videos, items.length >= ITEMS_PER_PAGE, page, params);
-    } catch (e) {
-        log("Failed to parse videos response: " + e.message);
+    const unwrapped = unwrapEnvelope(resp);
+    if (!unwrapped.items) {
         return createEmptyVideoPager(page, params);
     }
+
+    const videos = unwrapped.items.map(function (item) { return buildPlatformVideo(item); });
+    return new NASAVideoPager(videos, page < unwrapped.totalPages, page, params);
 }
 
 /**
@@ -1009,7 +1058,7 @@ function searchVideos(query, page, params) {
 
     let url = API_BASE_URL + "/video?per_page=" + ITEMS_PER_PAGE
         + "&page=" + page + "&search=" + encodeURIComponent(query)
-        + "&orderby=relevance&order=desc";
+        + "&orderby=relevance&order=desc&_envelope=1";
 
     if (params.series) {
         url += "&series=" + params.series;
@@ -1020,14 +1069,17 @@ function searchVideos(query, page, params) {
     }
 
     const resp = httpGET({ url: url, parseResponse: true });
-    if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) {
+    if (!resp.isOk) {
         return new NASASearchPager([], false, query, page, params);
     }
 
-    const videos = resp.body.map(function (item) { return buildPlatformVideo(item); });
-    const hasMore = resp.body.length >= ITEMS_PER_PAGE;
+    const unwrapped = unwrapEnvelope(resp);
+    if (!unwrapped.items) {
+        return new NASASearchPager([], false, query, page, params);
+    }
 
-    return new NASASearchPager(videos, hasMore, query, page, params);
+    const videos = unwrapped.items.map(function (item) { return buildPlatformVideo(item); });
+    return new NASASearchPager(videos, page < unwrapped.totalPages, query, page, params);
 }
 
 /**
@@ -1043,7 +1095,7 @@ function buildPlatformVideo(item) {
         name: videoData.title,
         thumbnails: videoData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: videoData.uploadDate,
+        datetime: videoData.uploadDate,
         duration: videoData.duration,
         viewCount: 0,
         url: videoData.url,
@@ -1065,7 +1117,7 @@ function buildVideoDetails(item) {
         name: videoData.title,
         thumbnails: videoData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: videoData.uploadDate,
+        datetime: videoData.uploadDate,
         duration: videoData.duration,
         viewCount: 0,
         url: videoData.url,
@@ -1089,7 +1141,11 @@ function buildVideoDetails(item) {
  */
 function extractContent(item) {
     const rawContent = typeof item.content === "object" ? (item.content.rendered || "") : (item.content || "");
-    return decodeHtmlEntities(rawContent).replace(/<[^>]*>/g, "").trim();
+    return decodeHtmlEntities(rawContent)
+        .replace(/<\/p\s*>|<br\s*\/?>/gi, "\n")
+        .replace(/<[^>]*>/g, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
 }
 
 /**
@@ -1212,8 +1268,11 @@ function parseDate(dateStr) {
         return 0;
     }
 
-    const ts = new Date(dateStr).getTime();
+    const normalized = dateStr.replace(" ", "T");
+    const hasTimezone = /[Zz]|[+-]\d{2}:?\d{2}$/.test(normalized);
+    const ts = new Date(hasTimezone ? normalized : normalized + "Z").getTime();
     if (isNaN(ts)) {
+        log("parseDate: failed to parse date string: " + dateStr);
         return 0;
     }
 
@@ -1249,7 +1308,11 @@ function decodeHtmlEntities(text) {
         .replace(/&gt;/g, ">")
         .replace(/&quot;/g, '"')
         .replace(/&#039;/g, "'")
-        .replace(/&apos;/g, "'");
+        .replace(/&apos;/g, "'")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&mdash;/g, "—")
+        .replace(/&ndash;/g, "–")
+        .replace(/&hellip;/g, "…");
 }
 
 /**
@@ -1261,7 +1324,7 @@ function nasaAuthor() {
         new PlatformID(PLATFORM, "nasa-plus", config.id),
         PLATFORM,
         BASE_URL,
-        CHANNEL_THUMBNAIL_URL
+        PLUGIN_ICON_URL
     );
 }
 
@@ -1273,7 +1336,7 @@ function getNASAChannel() {
     return new PlatformChannel({
         id: new PlatformID(PLATFORM, "nasa-plus", config.id),
         name: PLATFORM,
-        thumbnail: CHANNEL_THUMBNAIL_URL,
+        thumbnail: PLUGIN_ICON_URL,
         banner: "",
         subscribers: 0,
         description: CHANNEL_DESCRIPTION,
@@ -1308,7 +1371,7 @@ function buildSeriesChannelFromTaxonomy(series) {
     return new PlatformChannel({
         id: new PlatformID(PLATFORM, "series-" + series.slug, config.id),
         name: series.name,
-        thumbnail: CHANNEL_THUMBNAIL_URL,
+        thumbnail: PLUGIN_ICON_URL,
         banner: "",
         subscribers: 0,
         description: series.description || "",
@@ -1326,7 +1389,7 @@ function buildTopicChannelFromTaxonomy(topic) {
     return new PlatformChannel({
         id: new PlatformID(PLATFORM, "topic-" + topic.slug, config.id),
         name: topic.name,
-        thumbnail: CHANNEL_THUMBNAIL_URL,
+        thumbnail: PLUGIN_ICON_URL,
         banner: "",
         subscribers: 0,
         description: topic.description || "",
@@ -1373,7 +1436,7 @@ function fetchAllSeries() {
         return state.series;
     }
 
-    const resp = httpGET({ url: API_BASE_URL + "/series?per_page=100", parseResponse: true });
+    const resp = httpGET({ url: API_BASE_URL + "/series?per_page=" + MAX_PER_PAGE, parseResponse: true });
     if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) {
         return state.series;
     }
@@ -1392,7 +1455,7 @@ function fetchAllTopics() {
         return state.topics;
     }
 
-    const resp = httpGET({ url: API_BASE_URL + "/topic?per_page=100", parseResponse: true });
+    const resp = httpGET({ url: API_BASE_URL + "/topic?per_page=" + MAX_PER_PAGE, parseResponse: true });
     if (!resp.isOk || !resp.body || !Array.isArray(resp.body)) {
         return state.topics;
     }
@@ -1416,20 +1479,6 @@ function findSeriesBySlug(slug) {
     }
 
     return null;
-}
-
-/**
- * Finds a series taxonomy ID by its slug.
- * @param {string} slug - Series slug
- * @returns {number|null} Series ID or null if not found
- */
-function findSeriesIdBySlug(slug) {
-    const series = findSeriesBySlug(slug);
-    if (!series) {
-        return null;
-    }
-
-    return series.id;
 }
 
 /**
@@ -1482,7 +1531,7 @@ function getSeriesPlaylists() {
  * Returns series playlists filtered by topic.
  * Fetches videos for the topic to discover which series they belong to.
  * @param {string} topicSlug - Topic slug
- * @returns {NASAPlaylistPager}
+ * @returns {NASATopicPlaylistPager}
  */
 function getTopicSeriesPlaylists(topicSlug) {
     const topicId = findTopicIdBySlug(topicSlug);
@@ -1497,48 +1546,45 @@ function getTopicSeriesPlaylists(topicSlug) {
  * Carries forward already-seen series IDs to avoid duplicates across pages.
  * @param {number} topicId - Topic taxonomy ID
  * @param {number} page - Current video page (1-based)
- * @param {Object} seenSeriesIds - Map of already-returned series IDs
+ * @param {Object} seenSeriesIds - Set-like object keyed by already-returned series IDs
  * @returns {NASATopicPlaylistPager}
  */
 function fetchTopicSeriesPage(topicId, page, seenSeriesIds) {
     const resp = httpGET({
-        url: API_BASE_URL + "/video?per_page=100&page=" + page + "&topic=" + topicId,
+        url: API_BASE_URL + "/video?per_page=" + MAX_PER_PAGE + "&page=" + page + "&topic=" + topicId + "&_envelope=1",
         parseResponse: true
     });
 
-    if (!resp.isOk || !resp.body || !Array.isArray(resp.body) || resp.body.length === 0) {
+    if (!resp.isOk) {
         return new NASATopicPlaylistPager([], false, topicId, page, seenSeriesIds);
     }
 
-    const newSeriesIds = {};
-    for (let i = 0; i < resp.body.length; i++) {
-        const seriesIds = resp.body[i].series;
+    const unwrapped = unwrapEnvelope(resp);
+    if (!unwrapped.items || unwrapped.items.length === 0) {
+        return new NASATopicPlaylistPager([], false, topicId, page, seenSeriesIds);
+    }
+
+    const newlyAdded = {};
+    for (let i = 0; i < unwrapped.items.length; i++) {
+        const seriesIds = unwrapped.items[i].series;
         if (seriesIds) {
             for (let j = 0; j < seriesIds.length; j++) {
-                if (!seenSeriesIds[seriesIds[j]]) {
-                    newSeriesIds[seriesIds[j]] = true;
+                const id = seriesIds[j];
+                if (!seenSeriesIds[id]) {
+                    seenSeriesIds[id] = true;
+                    newlyAdded[id] = true;
                 }
             }
         }
     }
 
-    const allSeries = fetchAllSeries();
-    const playlists = allSeries
-        .filter(function (s) { return newSeriesIds[s.id] && s.count > 0; })
+    const playlists = fetchAllSeries()
+        .filter(function (s) { return newlyAdded[s.id] && s.count > 0; })
         .sort(function (a, b) { return (b.count || 0) - (a.count || 0); })
         .map(function (s) { return buildSeriesPlaylist(s); });
 
-    const updatedSeen = {};
-    for (const k in seenSeriesIds) {
-        updatedSeen[k] = true;
-    }
-
-    for (const k2 in newSeriesIds) {
-        updatedSeen[k2] = true;
-    }
-
-    const hasMoreVideoPages = resp.body.length >= 100;
-    return new NASATopicPlaylistPager(playlists, hasMoreVideoPages, topicId, page, updatedSeen);
+    const hasMoreVideoPages = page < unwrapped.totalPages;
+    return new NASATopicPlaylistPager(playlists, hasMoreVideoPages, topicId, page, seenSeriesIds);
 }
 
 /**
@@ -1551,6 +1597,7 @@ function buildSeriesPlaylist(series) {
         id: new PlatformID(PLATFORM, "series-" + series.slug, config.id),
         name: series.name,
         author: nasaAuthor(),
+        datetime: Math.floor(Date.now() / 1000),
         thumbnail: PLUGIN_ICON_URL,
         url: BASE_URL + "/series/" + series.slug + "/",
         videoCount: series.count || -1
@@ -1565,6 +1612,7 @@ function buildSeriesPlaylist(series) {
  */
 function parseScheduledResponse(resp) {
     if (!resp.isOk) {
+        log("HTTP request failed (scheduled): code " + resp.code);
         return [];
     }
 
@@ -1629,7 +1677,7 @@ function parseScheduledResponse(resp) {
             return b.status.endTime - a.status.endTime;
         }
 
-        return (a.video.uploadDate || 0) - (b.video.uploadDate || 0);
+        return (a.video.datetime || 0) - (b.video.datetime || 0);
     });
 
     return entries.map(function (entry) { return entry.video; });
@@ -1658,7 +1706,7 @@ function buildScheduledPlatformVideo(item, status) {
         name: scheduledData.title,
         thumbnails: scheduledData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: scheduledData.uploadDate,
+        datetime: scheduledData.uploadDate,
         duration: scheduledData.duration,
         viewCount: 0,
         url: scheduledData.url,
@@ -1681,7 +1729,7 @@ function buildScheduledVideoDetails(item) {
         name: scheduledData.title,
         thumbnails: scheduledData.thumbnails,
         author: nasaAuthor(),
-        uploadDate: scheduledData.uploadDate,
+        datetime: scheduledData.uploadDate,
         duration: scheduledData.duration,
         viewCount: 0,
         url: scheduledData.url,
@@ -1723,7 +1771,7 @@ function buildRelatedVideos(video) {
                     ? new Thumbnails([new Thumbnail(relatedThumbnailUrl, 0)])
                     : new Thumbnails([]),
                 author: nasaAuthor(),
-                uploadDate: parseDate(rv.post_date_gmt),
+                datetime: parseDate(rv.post_date_gmt),
                 duration: runtime,
                 viewCount: 0,
                 url: rv.permalink,
