@@ -875,7 +875,7 @@ function getVideoDisplayData(item) {
 /**
  * Builds the shared display fields for a scheduled video item.
  * @param {Object} item - WordPress scheduled_video REST API object
- * @param {boolean} isLive - Whether the event is currently live
+ * @param {boolean} isLive - Whether the event is live or planned (hides the duration)
  * @returns {Object}
  */
 function getScheduledDisplayData(item, isLive) {
@@ -1699,7 +1699,9 @@ function getScheduledThumbnailUrl(item) {
  * @returns {PlatformVideo}
  */
 function buildScheduledPlatformVideo(item, status) {
-    const scheduledData = getScheduledDisplayData(item, status.isLive);
+    // Grayjay renders isLive + future datetime as planned.
+    const isLiveOrPlanned = status.isLive || status.isUpcoming;
+    const scheduledData = getScheduledDisplayData(item, isLiveOrPlanned);
 
     return new PlatformVideo({
         id: scheduledData.id,
@@ -1710,7 +1712,7 @@ function buildScheduledPlatformVideo(item, status) {
         duration: scheduledData.duration,
         viewCount: 0,
         url: scheduledData.url,
-        isLive: status.isLive
+        isLive: isLiveOrPlanned
     });
 }
 
@@ -1722,7 +1724,9 @@ function buildScheduledPlatformVideo(item, status) {
 function buildScheduledVideoDetails(item) {
     const status = getScheduledEventStatus(item);
     const videoUrl = getVideoStreamUrl(item);
-    const scheduledData = getScheduledDisplayData(item, status.isLive);
+    // Grayjay renders isLive + future datetime as planned.
+    const isLiveOrPlanned = status.isLive || status.isUpcoming;
+    const scheduledData = getScheduledDisplayData(item, isLiveOrPlanned);
 
     const fields = {
         id: scheduledData.id,
@@ -1733,14 +1737,15 @@ function buildScheduledVideoDetails(item) {
         duration: scheduledData.duration,
         viewCount: 0,
         url: scheduledData.url,
-        isLive: status.isLive,
+        isLive: isLiveOrPlanned,
         description: extractContent(item),
         video: new VideoSourceDescriptor([])
     };
 
+    // Upcoming events keep no sources: the pre-published live URL 404s until the broadcast starts.
     if (status.isLive && videoUrl) {
         fields.live = buildHlsSource("Live", 0, videoUrl);
-    } else if (videoUrl) {
+    } else if (!status.isUpcoming && videoUrl) {
         fields.video = buildOnDemandVideoDescriptor(videoUrl, "", scheduledData.eventDuration);
     }
 

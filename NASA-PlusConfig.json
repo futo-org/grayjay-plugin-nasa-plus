@@ -2,7 +2,7 @@
   "id": "a1b2c3d4-5e6f-7890-abcd-ef1234567890",
   "name": "NASA+",
   "description": "Explore the unknown in air and space. Watch original series, documentaries, and features from NASA's streaming service.",
-  "version": 5,
+  "version": 6,
   "author": "FUTO",
   "authorUrl": "https://futo.tech",
   "platformUrl": "https://plus.nasa.gov",
@@ -38,6 +38,9 @@
     }
   },
   "changelog": {
+    "6": [
+      "Fix: Upcoming events show as planned instead of failing to play;"
+    ],
     "5": [
       "Fix: Live event detection when end time is unknown;",
       "Fix: Hide empty series and topics from channel search results;",
